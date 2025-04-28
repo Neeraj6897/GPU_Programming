@@ -1,0 +1,100 @@
+#include <iostream>
+#include <cuda_runtime.h>
+
+// Kernel: Performs a simple tree-based reduction in shared memory.
+__global__ void reduce4(int *g_idata, int *g_odata) {
+    extern __shared__ int sdata[];
+
+    // Version 4: perform first reduction step during the global→shared load
+    unsigned int tid = threadIdx.x;
+    unsigned int i   = blockIdx.x * (blockDim.x*2) + threadIdx.x;
+    // each thread loads two elements and immediately sums them
+    sdata[tid] = g_idata[i] + g_idata[i+blockDim.x];
+    __syncthreads();
+
+    // Perform the reduction in shared memory.
+    for (unsigned int s = blockDim.x/2; s >0; s >>=1 ) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // The first thread in each block writes the block's result to global memory.
+    if (tid == 0)
+        g_odata[blockIdx.x] = sdata[0];
+}
+
+int main() {
+    // Total number of elements in the input array.
+    int N = 134217728; // Make sure N is a multiple of blockSize for this simple example.
+    int size = N * sizeof(int);
+
+    // Set kernel launch parameters.
+    int blockSize = 256;
+    int numBlocks = N / blockSize; //(N + blockSize -1) / blockSize;
+
+    // Allocate and initialize host memory.
+    int *h_in  = new int[N];
+    int *h_out = new int[numBlocks]; // One output value per block.
+    for (int i = 0; i < N; i++) {
+        h_in[i] = 1;  // Each element is 1, so final sum should equal N.
+    }
+
+    // Allocate device memory.
+    int *d_in, *d_out;
+    cudaMalloc((void**)&d_in, size);
+    cudaMalloc((void**)&d_out, numBlocks * sizeof(int));  // With blockSize 256.
+
+    // Copy the input data from host to device.
+    cudaMemcpy(d_in, h_in, size, cudaMemcpyHostToDevice);
+
+    // Set kernel launch parameters.
+    //int gridSize = N / blockSize; // Number of thread blocks.
+
+    // Create CUDA events for timing.
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    // Record the start event.
+    cudaEventRecord(start, 0);
+
+    // Launch the reduction kernel.
+    // Third argument sets the shared memory size (in bytes) for each block. 
+    //Reduced the number of blocks to half (requirement for reduction4)
+    reduce4<<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out);
+
+     // Record the stop event.
+     cudaEventRecord(stop, 0);
+     cudaEventSynchronize(stop);
+ 
+     // Calculate elapsed time in milliseconds.
+     float elapsedTime;
+     cudaEventElapsedTime(&elapsedTime, start, stop);
+     std::cout << "Kernel execution time: " << elapsedTime << " ms" << std::endl;
+ 
+     // Clean up events.
+     cudaEventDestroy(start);
+     cudaEventDestroy(stop);
+
+    // Copy the partial sums (one per block) back to host.
+    cudaMemcpy(h_out, d_out, numBlocks * sizeof(int), cudaMemcpyDeviceToHost);
+
+    // Perform a final reduction on the host to sum up the partial results.
+    int total_sum = 0;
+    for (int i = 0; i < numBlocks; i++) {
+        total_sum += h_out[i];
+    }
+
+    // Print the final result.
+    std::cout << "Total sum is: " << total_sum << std::endl; // Should print 1024.
+
+    // Free host and device memory.
+    delete[] h_in;
+    delete[] h_out;
+    cudaFree(d_in);
+    cudaFree(d_out);
+
+    return 0;
+}
