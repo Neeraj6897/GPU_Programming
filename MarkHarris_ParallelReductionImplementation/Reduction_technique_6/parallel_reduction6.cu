@@ -1,17 +1,19 @@
 #include <iostream>
 #include <cuda_runtime.h>
 
+template <unsigned int blockSize>
 __device__ void warpReduce(volatile int* sdata, int tid) {
-    sdata[tid] = sdata[tid] + sdata[tid + 32];
-    sdata[tid] = sdata[tid] + sdata[tid + 16];
-    sdata[tid] = sdata[tid] + sdata[tid + 8];
-    sdata[tid] = sdata[tid] + sdata[tid + 4];
-    sdata[tid] = sdata[tid] + sdata[tid + 2];
-    sdata[tid] = sdata[tid] + sdata[tid + 1];
+    if (blockSize >= 64) { sdata[tid] = sdata[tid] + sdata[tid + 32]; }
+    if (blockSize >= 32) { sdata[tid] = sdata[tid] + sdata[tid + 16]; }
+    if (blockSize >= 16) { sdata[tid] = sdata[tid] + sdata[tid + 8]; }
+    if (blockSize >= 8) { sdata[tid] = sdata[tid] + sdata[tid + 4]; }
+    if (blockSize >= 4) { sdata[tid] = sdata[tid] + sdata[tid + 2]; }
+    if (blockSize >= 2) { sdata[tid] = sdata[tid] + sdata[tid + 1]; }
 }
 
 // Kernel: Performs a simple tree-based reduction in shared memory.
-__global__ void reduce5(int *g_idata, int *g_odata) {
+template <unsigned int blockSize>
+__global__ void reduce6(int *g_idata, int *g_odata) {
     extern __shared__ int sdata[];
 
     // Version 4: perform first reduction step during the global→shared load
@@ -29,8 +31,29 @@ __global__ void reduce5(int *g_idata, int *g_odata) {
         __syncthreads();
     }
 
+    if (blockSize >= 512) {
+        if (tid < 256) {
+            sdata[tid] = sdata[tid] + sdata[tid + 256];
+        }
+        __syncthreads();
+    }
+
+    if (blockSize >= 256) {
+        if (tid < 128) {
+            sdata[tid] = sdata[tid] + sdata[tid + 128];
+        }
+        __syncthreads();
+    }
+
+    if (blockSize >= 128) {
+        if (tid < 64) {
+            sdata[tid] = sdata[tid] + sdata[tid + 64];
+        }
+        __syncthreads();
+    }
+
     if (tid < 32) {
-        warpReduce(sdata, tid);
+        warpReduce<blockSize>(sdata, tid);
     }
 
     // The first thread in each block writes the block's result to global memory.
@@ -45,7 +68,7 @@ int main() {
 
     // Set kernel launch parameters.
     int blockSize = 256;
-    int numBlocks = N / blockSize; //(N + blockSize -1) / blockSize;
+    int numBlocks = (N + (2*blockSize) -1) / (2*blockSize);
 
     // Allocate and initialize host memory.
     int *h_in  = new int[N];
@@ -76,8 +99,18 @@ int main() {
     // Launch the reduction kernel.
     // Third argument sets the shared memory size (in bytes) for each block. 
     //Reduced the number of blocks to half (requirement for reduction4)
-    reduce5<<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out);
-
+    switch (blockSize) {
+        case 512: reduce6<512><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+        case 256: reduce6<256><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+        case 128: reduce6<128><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+        case 64: reduce6<64><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+        case 32: reduce6<32><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+        case 16: reduce6<16><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+        case 8: reduce6<8><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+        case 4: reduce6<4><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+        case 2: reduce6<2><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+        case 1: reduce6<1><<<numBlocks/2, blockSize, blockSize * sizeof(int)>>>(d_in, d_out); break;
+    }
      // Record the stop event.
      cudaEventRecord(stop, 0);
      cudaEventSynchronize(stop);
